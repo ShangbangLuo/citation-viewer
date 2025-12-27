@@ -2,7 +2,7 @@ fastapi==0.95.2
 uvicorn==0.22.0
 python-multipart==0.0.6
 PyJWT==2.9.0
-PyMuPDF==1.23.3
+PyMuPDF==1.21.1
 sentence-transformers==2.2.2
 torch==2.0.1
 transformers==4.33.3
