@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Citation Evidence Viewer (Backend Embeddings)</title>
+
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+        }
+
+        #container {
+            display: flex;
+            height: 100vh;
+        }
+
+        .panel {
+            flex: 1;
+            overflow: auto;
+            border-right: 1px solid #ccc;
+        }
+
+        .panel:last-child {
+            border-right: none;
+        }
+
+        .header {
+            position: sticky;
+            top: 0;
+            background: #f0f0f0;
+            padding: 6px;
+            font-weight: bold;
+            z-index: 10;
+            border-bottom: 1px solid #ccc;
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .status {
+            font-weight: normal;
+            font-size: 12px;
+            opacity: 0.9;
+        }
+
+        .pdf-page {
+            position: relative;
+            margin: 10px auto;
+        }
+
+        .textLayer {
+            position: absolute;
+            inset: 0;
+        }
+
+        #original .textLayer {
+            pointer-events: auto;
+            user-select: text;
+        }
+
+        #cited .textLayer {
+            pointer-events: none;
+            user-select: none;
+        }
+
+        .textLayer span {
+            position: absolute;
+            white-space: pre;
+            color: transparent;
+        }
+
+        .highlight-0 {
+            background: rgba(255, 235, 59, 0.45);
+            cursor: help;
+        }
+
+        .highlight-1 {
+            background: rgba(76, 175, 80, 0.40);
+            cursor: help;
+        }
+
+        .highlight-2 {
+            background: rgba(33, 150, 243, 0.40);
+            cursor: help;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="container">
+        <div class="panel">
+            <div class="header">
+                <span>Original Paper (select text)</span>
+                <span class="status" id="statusLeft">Select text…</span>
+            </div>
+            <div id="original"></div>
+        </div>
+
+        <div class="panel">
+            <div class="header">
+                <span>Cited Paper (Top-3 paragraphs)</span>
+                <span class="status" id="statusRight">Loading…</span>
+            </div>
+            <div id="cited"></div>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as pdfjsLib from "./pdfjs/pdf.mjs";
+        import { pipeline } from "https://cdn.jsdelivr.net/npm/@xenova/transformers";
+
+        pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdfjs/pdf.worker.mjs";
+
+        const statusLeft = document.getElementById("statusLeft");
+        const statusRight = document.getElementById("statusRight");
+
+        /* -------- 1) 从 URL 获取 file_id，并向后端要路径 -------- */
+        const params = new URLSearchParams(window.location.search);
+        const FILE_ID = params.get("file_id") || params.get("id"); // 兼容老的 ?id=
+        if (!FILE_ID) {
+            alert("❌ Missing file_id. Please open viewer via upload page.");
+            throw new Error("missing file_id");
+        }
+
+        const fileInfo = await fetch(`/api/file_info/${FILE_ID}`).then(r => {
+            if (!r.ok) throw new Error("file_id not found");
+            return r.json();
+        });
+
+        const ORIGINAL_PDF = fileInfo.original_url;
+        const CITED_PDF = fileInfo.cited_url;
+        const INDEX_JSON = fileInfo.index_url;
+
+        /* -------- 2) 工具函数 -------- */
+        function normalize(s) {
+            return s
+                .toLowerCase()
+                .replace(/[^\w\s]/g, " ")
+                .replace(/\s+/g, " ")
+                .trim();
+        }
+
+        function cosine(a, b) {
+            const n = Math.min(a.length, b.length);
+            let dot = 0, na = 0, nb = 0;
+            for (let i = 0; i < n; i++) {
+                const x = a[i], y = b[i];
+                dot += x * y;
+                na += x * x;
+                nb += y * y;
+            }
+            if (na === 0 || nb === 0) return 0;
+            return dot / Math.sqrt(na * nb);
+        }
+
+        /* -------- 3) 读取后端生成的 cited_index.json -------- */
+        const idx = await fetch(INDEX_JSON).then(r => r.json());
+        const paraIndex = idx.paragraphs.map(p => ({
+            id: p.id,
+            page: p.page,
+            text: p.text || "",
+            norm: p.norm || normalize(p.text || ""),
+            figures: p.figures || [],
+            embedding: p.embedding || [], // ✅ 后端已缓存
+        }));
+
+        /* -------- 4) 渲染 PDF -------- */
+        async function renderPDF(url, containerId) {
+            const pdf = await pdfjsLib.getDocument(url).promise;
+            const container = document.getElementById(containerId);
+            container.innerHTML = "";
+
+            const allSpans = [];
+
+            for (let p = 1; p <= pdf.numPages; p++) {
+                const page = await pdf.getPage(p);
+                const viewport = page.getViewport({ scale: 1.4 });
+
+                const pageDiv = document.createElement("div");
+                pageDiv.className = "pdf-page";
+                pageDiv.style.width = viewport.width + "px";
+                pageDiv.style.height = viewport.height + "px";
+
+                const canvas = document.createElement("canvas");
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+                pageDiv.appendChild(canvas);
+                container.appendChild(pageDiv);
+
+                await page.render({
+                    canvasContext: canvas.getContext("2d"),
+                    viewport
+                }).promise;
+
+                const textLayer = document.createElement("div");
+                textLayer.className = "textLayer";
+                pageDiv.appendChild(textLayer);
+
+                const textContent = await page.getTextContent();
+                textContent.items.forEach(item => {
+                    const span = document.createElement("span");
+                    const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+                    const fontSize = Math.hypot(tx[0], tx[1]);
+                    span.style.left = tx[4] + "px";
+                    span.style.top = (tx[5] - fontSize) + "px";
+                    span.style.fontSize = fontSize + "px";
+                    span.textContent = item.str;
+                    span.dataset.page = String(p);
+                    textLayer.appendChild(span);
+                    allSpans.push(span);
+                });
+            }
+            return allSpans;
+        }
+
+        // 先渲染右，再渲染左
+        const citedSpansPromise = renderPDF(CITED_PDF, "cited");
+        await renderPDF(ORIGINAL_PDF, "original");
+        const citedSpans = await citedSpansPromise;
+
+        /* -------- 5) 前端只负责 embed selection -------- */
+        statusRight.textContent = "Loading selection encoder…";
+        const embedder = await pipeline(
+            "feature-extraction",
+            "Xenova/all-MiniLM-L6-v2"
+        );
+
+        async function embedSelection(text) {
+            const out = await embedder(text, { pooling: "mean", normalize: true });
+            return Array.from(out.data);
+        }
+
+        /* -------- 6) 高亮逻辑：三种颜色 + hover figure label -------- */
+        function clearHighlights() {
+            citedSpans.forEach(s => {
+                s.classList.remove("highlight-0", "highlight-1", "highlight-2");
+                s.removeAttribute("title");
+            });
+        }
+
+        function highlightHits(hits) {
+            clearHighlights();
+
+            const normSpans = citedSpans.map(s => normalize(s.textContent || ""));
+
+            hits.forEach((hit, hitIdx) => {
+                const cls = `highlight-${hitIdx}`;
+                const para = hit.p;
+                const normP = para.norm;
+                const pageP = para.page;
+                const figLabel =
+                    para.figures && para.figures.length ? para.figures.join(", ") : "";
+
+                citedSpans.forEach((span, i) => {
+                    if (Number(span.dataset.page) !== Number(pageP)) return;
+
+                    const sNorm = normSpans[i];
+                    if (!sNorm || sNorm.length < 3) return;
+
+                    if (normP.includes(sNorm)) {
+                        span.classList.add(cls);
+                        if (figLabel) span.title = figLabel; // ✅ hover 显示 figure/table
+                    }
+                });
+            });
+        }
+
+        async function handleSelection(selText) {
+            const clean = selText.trim();
+            if (clean.length < 10) {
+                statusRight.textContent = "Selection too short";
+                clearHighlights();
+                return;
+            }
+
+            statusRight.textContent = "Embedding selection…";
+            const selVec = await embedSelection(clean);
+
+            // 用后端缓存的 paragraph embeddings 做相似度
+            const scored = paraIndex
+                .map(p => ({
+                    p,
+                    score:
+                        p.embedding && p.embedding.length
+                            ? cosine(selVec, p.embedding)
+                            : 0,
+                }))
+                .sort((a, b) => b.score - a.score)
+                .slice(0, 3)
+                .filter(x => x.score >= 0.3); // 阈值可按体验调整
+
+            if (!scored.length) {
+                statusRight.textContent = "No good paragraph match";
+                clearHighlights();
+                return;
+            }
+
+            statusRight.textContent =
+                "Top-3: " +
+                scored
+                    .map(x => `${x.p.id} (p.${x.p.page}, ${x.score.toFixed(2)})`)
+                    .join(" ; ");
+
+            highlightHits(scored);
+        }
+
+        /* -------- 7) 只响应左栏 original 的选择 -------- */
+        document.addEventListener("mouseup", () => {
+            const selObj = window.getSelection();
+            const text = selObj ? selObj.toString().trim() : "";
+            if (!text) return;
+
+            const anchorNode = selObj.anchorNode;
+            const anchorEl =
+                anchorNode && anchorNode.nodeType === Node.TEXT_NODE
+                    ? anchorNode.parentElement
+                    : anchorNode;
+
+            const originalPanel = document.getElementById("original");
+            if (!originalPanel.contains(anchorEl)) {
+                return;
+            }
+
+            statusLeft.textContent = `Selected ${text.length} chars`;
+            handleSelection(text);
+        });
+
+        statusRight.textContent = "Ready – select text on the left.";
+    </script>
+</body>
+
+</html>

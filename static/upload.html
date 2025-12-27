@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Upload PDFs – Citation Viewer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            max-width: 650px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            font-size: 22px;
+            margin-bottom: 10px;
+        }
+
+        .section {
+            margin-bottom: 30px;
+        }
+
+        .drop-box {
+            border: 2px dashed #bbb;
+            border-radius: 10px;
+            padding: 30px;
+            text-align: center;
+            font-size: 14px;
+            color: #777;
+            transition: .2s;
+            cursor: pointer;
+            background: #fafafa;
+        }
+
+        .drop-box.highlight {
+            border-color: #1976d2;
+            background: #e9f3ff;
+            color: #1976d2;
+        }
+
+        .file-row {
+            margin-top: 8px;
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .remove-btn {
+            cursor: pointer;
+            background: #d9534f;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            border: none;
+        }
+
+        .remove-btn:hover {
+            background: #b52b27;
+        }
+
+        button {
+            padding: 12px 18px;
+            border: none;
+            color: white;
+            background: #1976d2;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 15px;
+            margin-top: 20px;
+        }
+
+        button:hover {
+            background: #0f59a5;
+        }
+
+        #result {
+            margin-top: 25px;
+            white-space: pre-wrap;
+            font-size: 14px;
+        }
+
+        a.viewer-link {
+            color: #1976d2;
+            font-weight: bold;
+            text-decoration: none;
+        }
+
+        a.viewer-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Upload PDF Pair</h1>
+    <p>Select or drag files to upload. You must upload 2 files:</p>
+
+    <!-- ORIGINAL -->
+    <div class="section">
+        <strong>1️⃣ Original Paper</strong>
+        <div id="originalBox" class="drop-box">Click or Drag PDF here</div>
+        <input type="file" id="origInput" accept="application/pdf" hidden>
+        <div id="origRow"></div>
+    </div>
+
+    <!-- CITED -->
+    <div class="section">
+        <strong>2️⃣ Cited Paper</strong>
+        <div id="citedBox" class="drop-box">Click or Drag PDF here</div>
+        <input type="file" id="citedInput" accept="application/pdf" hidden>
+        <div id="citedRow"></div>
+    </div>
+
+    <button id="uploadBtn">Upload & Build Index</button>
+    <div id="result"></div>
+
+    <script>
+        const originalBox = document.getElementById("originalBox");
+        const citedBox = document.getElementById("citedBox");
+        const origInput = document.getElementById("origInput");
+        const citedInput = document.getElementById("citedInput");
+        const origRow = document.getElementById("origRow");
+        const citedRow = document.getElementById("citedRow");
+        const resultDiv = document.getElementById("result");
+        const uploadBtn = document.getElementById("uploadBtn");
+
+        // ---- 防止“后退”后的旧状态复用：如果是从 bfcache 恢复，就强制刷新 ----
+        window.addEventListener("pageshow", (event) => {
+            if (event.persisted) {
+                // 从浏览器缓存恢复，强制重新加载，保证表单是干净的
+                window.location.reload();
+            } else {
+                // 首次进入页面时，也把状态清一下
+                origInput.value = "";
+                citedInput.value = "";
+                origRow.innerHTML = "";
+                citedRow.innerHTML = "";
+                resultDiv.textContent = "";
+            }
+        });
+
+        function createFileList(file) {
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            return dt.files;
+        }
+
+        function handleSelect(input, rowDiv, file) {
+            input.files = createFileList(file);
+            rowDiv.innerHTML = `
+      <div class="file-row">
+        <span>${file.name}</span>
+        <button class="remove-btn" onclick="clearFile('${input.id}')">❌</button>
+      </div>`;
+        }
+
+        window.clearFile = function (id) {
+            const input = document.getElementById(id);
+            input.value = "";
+            (id === 'origInput' ? origRow : citedRow).innerHTML = "";
+        }
+
+        // 点击框 → 打开文件选择
+        originalBox.onclick = () => origInput.click();
+        citedBox.onclick = () => citedInput.click();
+
+        origInput.onchange = () => {
+            const f = origInput.files[0];
+            if (f) handleSelect(origInput, origRow, f);
+        };
+        citedInput.onchange = () => {
+            const f = citedInput.files[0];
+            if (f) handleSelect(citedInput, citedRow, f);
+        };
+
+        // 拖拽逻辑
+        function makeDrop(box, targetInput, rowDiv) {
+            ["dragenter", "dragover"].forEach(ev =>
+                box.addEventListener(ev, e => {
+                    e.preventDefault();
+                    box.classList.add("highlight");
+                })
+            );
+            ["dragleave", "drop"].forEach(ev =>
+                box.addEventListener(ev, e => {
+                    e.preventDefault();
+                    box.classList.remove("highlight");
+                })
+            );
+            box.addEventListener("drop", e => {
+                const f = [...e.dataTransfer.files][0];
+                if (!f || f.type !== "application/pdf") return alert("Only PDF allowed");
+                handleSelect(targetInput, rowDiv, f);
+            });
+        }
+        makeDrop(originalBox, origInput, origRow);
+        makeDrop(citedBox, citedInput, citedRow);
+
+        // 上传
+        uploadBtn.onclick = async () => {
+            if (!origInput.files[0] || !citedInput.files[0])
+                return alert("Please upload both files!");
+
+            // 上传期间禁用按钮，防止重复点
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = "Uploading…";
+            resultDiv.textContent = "⏳ Uploading…";
+
+            const fd = new FormData();
+            fd.append("original", origInput.files[0]);
+            fd.append("cited", citedInput.files[0]);
+
+            try {
+                const res = await fetch("/api/upload_pair", { method: "POST", body: fd });
+                const data = await res.json();
+
+                if (!res.ok) throw new Error(data.detail || "Upload failed");
+
+                const url = data.viewer_url;
+                resultDiv.innerHTML =
+                    "Upload success!\n" +
+                    `file_id: ${data.file_id}\n\n` +
+                    `Redirecting to Viewer…`;
+
+                // 稍微等一下，让用户能看到成功信息
+                setTimeout(() => {
+                    window.location.href = url;
+                }, 800);
+            } catch (err) {
+                resultDiv.textContent = "❌ Error: " + err.message;
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = "Upload & Build Index";
+            }
+        };
+    </script>
+</body>
+
+</html>
